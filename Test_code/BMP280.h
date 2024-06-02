@@ -74,14 +74,14 @@ int BMP_mode(mode_interface mode) {
     if (mode == I2C_mode) {
         fd = open("/dev/bmp280_device_I2C",O_RDWR);
         if (fd<0) {
-        perror("fail to open I2C device...\n");
+        perror("Failed to open I2C device...\n");
         return errno;
     }
     }
     else if (mode == SPI_mode) {
         fd = open("/dev/bmp280_driver_spi",O_RDWR);
         if (fd<0) {
-        perror("fail to open SPI device...\n");
+        perror("Failed to open SPI device...\n");
         return errno;
     }   
     }
