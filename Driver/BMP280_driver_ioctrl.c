@@ -270,7 +270,7 @@ static int bmp280_probe(struct i2c_client *client, const struct i2c_device_id *i
     if (ret != 0x58) {
         printk("ma ID: %x",ret);
         printk(KERN_ERR "Failed to wake up BMP\n");
-        return ret;
+        return -1;
     }
 
     bmp280_client = client;
