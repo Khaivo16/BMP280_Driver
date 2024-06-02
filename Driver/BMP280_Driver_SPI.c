@@ -3,17 +3,26 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
-#include <linux/i2c.h>
+#include <linux/spi/spi.h>
+#include <linux/device.h>
 
+#define DEVICE_NAME "bmp280_driver_spi"
+#define CLASS_NAME "bmp280_spi_device"
+#define MY_BUS_NUM 0
 
-#define DEVICE_NAME "bmp280_device_I2C" 
-#define CLASS_NAME "bmp280_device_I2C"
-
-/* Variables for device and device class */
 static struct class *bmp280_class=NULL;
 static struct device *bmp280_device=NULL;
 
-static int major_number;
+struct bmp280_data {
+    struct spi_device *spi_device;
+    struct class *bmp280_class;
+    dev_t devt;
+    struct cdev cdev;
+};
+
+static struct bmp280_data bmp280_dev; 
+
+static int major_number; 
 // address register
 #define BMP280_ADDR             0x76
 #define BMP280_REG_ID           0xD0
@@ -79,24 +88,25 @@ int32_t t_fine,T;
 int32_t P;
 static int device_open_count=0;
 
-static struct i2c_client *bmp280_client;
+int bmp280_write_register(struct spi_device *spi, uint8_t reg, uint8_t value)
+{
+    uint8_t tx_buf[2];
+    tx_buf[0] = reg & 0x7F; // Đảm bảo MSB của reg là 0 để thực hiện ghi
+    tx_buf[1] = value;
 
-static void read_calib(struct i2c_client *client){
-    for (int i = 136;i <=161;i++) { 
-        data[i-136] = i2c_smbus_read_byte_data(client,i);    
+    return spi_write(spi, tx_buf, 2);
+}
+
+int bmp280_read_register(struct spi_device *spi, uint8_t reg) {
+    // Ensure MSB is 1 to indicate read operation
+    reg |= 0x80;
+    
+    int ret = spi_w8r8(spi, reg);
+    if (ret < 0) {
+        printk(KERN_ERR "SPI read failed: %d\n", ret);
+        return ret;
     }
-    dig_T1 = (data[1]<<8) | data[0];
-    dig_T2 = (data[3]<<8) | data[2];
-    dig_T3 = (data[5]<<8) | data[4];
-    dig_P1 = (data[7]<<8) | data[6];
-    dig_P2 = (data[9]<<8) | data[8];
-    dig_P3 = (data[11]<<8) | data[10];
-    dig_P4 = (data[13]<<8) | data[12];
-    dig_P5 = (data[15]<<8) | data[14];
-    dig_P6 = (data[17]<<8) | data[16];
-    dig_P7 = (data[19]<<8) | data[18];
-    dig_P8 = (data[21]<<8) | data[20];
-    dig_P9 = (data[23]<<8) | data[22];
+    return (uint8_t)ret;;
 }
 
 int32_t bmp280_compensate_T(int32_t adc_T) {
@@ -138,6 +148,28 @@ int32_t bmp280_compensate_P(int32_t adc_P,int32_t t_fine)
 
 
 
+static void read_calib(void){
+    for (int i = 136;i <=161;i++) { 
+        data[i-136] = bmp280_read_register(bmp280_dev.spi_device,i);    
+    }
+    dig_T1 = (data[1]<<8) | data[0];
+    dig_T2 = (data[3]<<8) | data[2];
+    dig_T3 = (data[5]<<8) | data[4];
+    dig_P1 = (data[7]<<8) | data[6];
+    dig_P2 = (data[9]<<8) | data[8];
+    dig_P3 = (data[11]<<8) | data[10];
+    dig_P4 = (data[13]<<8) | data[12];
+    dig_P5 = (data[15]<<8) | data[14];
+    dig_P6 = (data[17]<<8) | data[16];
+    dig_P7 = (data[19]<<8) | data[18];
+    dig_P8 = (data[21]<<8) | data[20];
+    dig_P9 = (data[23]<<8) | data[22];
+
+    for (int i =0; i<=23;i++) {
+        printk("data thu %d:%d",i,data[i]);
+    }
+}
+
 static int driver_open(struct inode *device_file, struct file *instance) {
 	if (device_open_count>0){
         return -EBUSY;
@@ -159,66 +191,61 @@ static int driver_close(struct inode *device_file, struct file *instance) {
 static long bmp280_ioctl(struct file *file, MODE_ACTIVE cmd, unsigned long arg)
 {
     char data_config,data_ctrl_meas;
-    printk(KERN_INFO "MODE: %d\n", cmd);
 
-    if (!bmp280_client) {
-        printk(KERN_ERR "bmp280_client is NULL\n");
-        return -EFAULT;
-    }
     switch (cmd) {
         case HANDHELD_DEVICE_LOW_POWER:
             data_config = BMP280_STANDBY_TIME_63_MS<<5 | BMP280_FILTER_COEFF_4<<2 | 0x00;
             data_ctrl_meas = BMP280_OVERSAMP_2X<<5 | BMP280_OVERSAMP_16X<<2 | BMP280_NORMAL_MODE; 
             printk("data_config: %x\n", data_config);
             printk("data_ctrl: %x\n", data_ctrl_meas);
-            i2c_smbus_write_byte_data(bmp280_client, 0xF5, data_config);
-            i2c_smbus_write_byte_data(bmp280_client, 0xF4, data_ctrl_meas);
+            bmp280_write_register(bmp280_dev.spi_device,0xF5,data_config);
+            bmp280_write_register(bmp280_dev.spi_device,0xF4,data_ctrl_meas);
             break;
         case WEATHER_MONITORING:
             data_config = BMP280_STANDBY_TIME_1000_MS<<5 | BMP280_FILTER_COEFF_OFF<<2 | 0x00;
             data_ctrl_meas = BMP280_OVERSAMP_1X<<5 | BMP280_OVERSAMP_1X<<2 | BMP280_FORCED_MODE;
             printk("data_config: %x\n", data_config);
             printk("data_ctrl: %x\n", data_ctrl_meas); 
-            i2c_smbus_write_byte_data(bmp280_client, 0xF5, data_config);
-            i2c_smbus_write_byte_data(bmp280_client, 0xF4, data_ctrl_meas);
+            bmp280_write_register(bmp280_dev.spi_device,0xF5,data_config);
+            bmp280_write_register(bmp280_dev.spi_device,0xF4,data_ctrl_meas);
             break;
         case HANDHELD_DEVICE_DYNAMIC:
             data_config = BMP280_STANDBY_TIME_1_MS<<5 | BMP280_FILTER_COEFF_16<<2 | 0x00;
             data_ctrl_meas = BMP280_OVERSAMP_1X<<5 | BMP280_OVERSAMP_4X<<2 | BMP280_NORMAL_MODE;
             printk("data_config: %x\n", data_config);
             printk("data_ctrl: %x\n", data_ctrl_meas); 
-            i2c_smbus_write_byte_data(bmp280_client, 0xF5, data_config);
-            i2c_smbus_write_byte_data(bmp280_client, 0xF4, data_ctrl_meas);
+            bmp280_write_register(bmp280_dev.spi_device,0xF5,data_config);
+            bmp280_write_register(bmp280_dev.spi_device,0xF4,data_ctrl_meas);
             break;
         case EVELATOR_FLOOR_CHANGE:
             data_config = BMP280_STANDBY_TIME_125_MS<<5 | BMP280_FILTER_COEFF_4<<2 | 0x00;
             data_ctrl_meas = BMP280_OVERSAMP_1X<<5 | BMP280_OVERSAMP_4X<<2 | BMP280_NORMAL_MODE;
             printk("data_config: %x\n", data_config);
             printk("data_ctrl: %x\n", data_ctrl_meas); 
-            i2c_smbus_write_byte_data(bmp280_client, 0xF5, data_config);
-            i2c_smbus_write_byte_data(bmp280_client, 0xF4, data_ctrl_meas);
+            bmp280_write_register(bmp280_dev.spi_device,0xF5,data_config);
+            bmp280_write_register(bmp280_dev.spi_device,0xF4,data_ctrl_meas);
             break;
         case DROP_DETECTION:
             data_config = BMP280_STANDBY_TIME_1_MS<<5 | BMP280_FILTER_COEFF_OFF<<2 | 0x00;
             data_ctrl_meas = BMP280_OVERSAMP_1X<<5 | BMP280_OVERSAMP_2X<<2 | BMP280_NORMAL_MODE;
             printk("data_config: %x\n", data_config);
             printk("data_ctrl: %x\n", data_ctrl_meas); 
-            i2c_smbus_write_byte_data(bmp280_client, 0xF5, data_config);
-            i2c_smbus_write_byte_data(bmp280_client, 0xF4, data_ctrl_meas);
+            bmp280_write_register(bmp280_dev.spi_device,0xF5,data_config);
+            bmp280_write_register(bmp280_dev.spi_device,0xF4,data_ctrl_meas);
             break;
         case INDOOR_NAVIGATION:
             data_config = BMP280_STANDBY_TIME_1_MS<<5 | BMP280_FILTER_COEFF_16<<2 | 0x00;
             data_ctrl_meas = BMP280_OVERSAMP_2X<<5 | BMP280_OVERSAMP_16X<<2 | BMP280_NORMAL_MODE;
             printk("data_config: %x\n", data_config);
             printk("data_ctrl: %x\n", data_ctrl_meas); 
-            i2c_smbus_write_byte_data(bmp280_client, 0xF5, data_config);
-            i2c_smbus_write_byte_data(bmp280_client, 0xF4, data_ctrl_meas);
+            bmp280_write_register(bmp280_dev.spi_device,0xF5,data_config);
+            bmp280_write_register(bmp280_dev.spi_device,0xF4,data_ctrl_meas);
             break;
         case CONFIG_SETUP_0xF4:
-            i2c_smbus_write_byte_data(bmp280_client, 0xF4, arg);
+            bmp280_write_register(bmp280_dev.spi_device,0xF4,arg);
             break;
         case CONFIG_SETUP_0xF5:
-            i2c_smbus_write_byte_data(bmp280_client, 0xF5, arg);
+            bmp280_write_register(bmp280_dev.spi_device,0xF5,arg);
             break;
         default:
             printk("MODE: %d\n", cmd);
@@ -235,15 +262,14 @@ static ssize_t driver_read(struct file *File, char *user_buffer, size_t count, l
 	/* Get amount of data to copy */
 	to_copy = min(count, sizeof(out_string));
     // Read data from MPU6050 sensor
-    read_calib(bmp280_client);
-    adc_T = (i2c_smbus_read_byte_data(bmp280_client, 0xFA) << 12) | (i2c_smbus_read_byte_data(bmp280_client, 0xFB) << 4) | (i2c_smbus_read_byte_data(bmp280_client, 0xFC) >> 4);
-    adc_P = (i2c_smbus_read_byte_data(bmp280_client, 0xF7) << 12) | (i2c_smbus_read_byte_data(bmp280_client,0xF8) << 4) | (i2c_smbus_read_byte_data(bmp280_client, 0xF9) >> 4);
+    adc_T = (bmp280_read_register(bmp280_dev.spi_device, 0xFA) << 12) | (bmp280_read_register(bmp280_dev.spi_device, 0xFB) << 4) | (bmp280_read_register(bmp280_dev.spi_device, 0xFC) >> 4);
+    adc_P = (bmp280_read_register(bmp280_dev.spi_device, 0xF7) << 12) | (bmp280_read_register(bmp280_dev.spi_device, 0xF8) << 4) | (bmp280_read_register(bmp280_dev.spi_device, 0xF9) >> 4);
 
     t_fine = bmp280_compensate_T(adc_T);
     P = bmp280_compensate_P(adc_P, t_fine);
 
     TEM = (int32_t)((t_fine * 5 + 128) >> 8);
-    printk("%d\n",P);
+    printk("%d\n",TEM);
     snprintf(out_string, sizeof(out_string),"%d.%d\n%d.%d\n", TEM/100, TEM%100, P/100, P%100);
 	/* Copy data to user */
 	not_copied = copy_to_user(user_buffer, out_string, to_copy);
@@ -261,19 +287,30 @@ static struct file_operations fops = {
     .read = driver_read
 };
 
-static int bmp280_probe(struct i2c_client *client, const struct i2c_device_id *id)
-{
-    int ret;
+static int bmp280_probe(struct spi_device *spi) {
+	u8 id;
 
-    // Set power management register to wake up device
-    ret = i2c_smbus_read_byte_data(client, BMP280_REG_ID);
-    if (ret != 0x58) {
-        printk("ma ID: %x",ret);
-        printk(KERN_ERR "Failed to wake up BMP\n");
-        return -1;
+    // Lưu thiết bị SPI
+    bmp280_dev.spi_device = spi;
+
+    bmp280_dev.spi_device->bits_per_word = 8;
+
+    bmp280_dev.spi_device -> max_speed_hz = 1000000;
+
+
+	// Thiết lập bus với các thông số của thiết bị
+    if (spi_setup(spi) != 0) {
+        printk(KERN_ERR "Could not change bus setup!\n");
+        return -ENODEV;
     }
-
-    bmp280_client = client;
+    id = bmp280_read_register(spi, 0xD0);
+	printk("Chip ID: 0x%x\n", id);
+    if (id != 0x58) {
+        printk("ma ID: %x",id);
+        printk(KERN_ERR "Failed to wake up BMP\n");
+        return ret;
+    }
+    read_calib();
     /*Register a major number*/
 	major_number = register_chrdev(0,DEVICE_NAME,&fops);
     if (major_number<0) {
@@ -295,64 +332,47 @@ static int bmp280_probe(struct i2c_client *client, const struct i2c_device_id *i
         printk(KERN_ALERT"fail to create GPIO device\n");
         return PTR_ERR(bmp280_device);
     }
-    printk(KERN_INFO "BMP280 driver installed\n");
+
+    printk(KERN_INFO "BMP280 driver probed\n");
+
     return 0;
 }
 
-static void bmp280_remove(struct i2c_client *client)
-{
+static void bmp280_remove(struct spi_device *spi) {
     device_destroy(bmp280_class,MKDEV(major_number,0));
     class_unregister(bmp280_class);
     class_destroy(bmp280_class);
     unregister_chrdev(major_number,DEVICE_NAME);
     printk(KERN_INFO "BMP280 driver removed\n");
 
-    // Clean up
- 
 }
 
-// static const struct i2c_device_id bmp280_id[] = {
-//     { "bmp280", 0 },
-//     { }
-// };
-// MODULE_DEVICE_TABLE(i2c, bmp280_id);
-
-// static struct i2c_driver bmp280_driver = {
-//     .driver = {
-//         .name   = DEVICE_NAME,
-//         .owner  = THIS_MODULE,
-//     },
-//     .probe      = bmp280_probe,
-//     .remove     = bmp280_remove,
-//     .id_table   = bmp280_id,
-// };
-
-static const struct of_device_id bmp280_of_match[] = {
-    { .compatible = "bmp280_1", },
-    { },
+static const struct spi_device_id bmp280_id[] = {
+    { "spidev_0", 0 },
+    { }
 };
-MODULE_DEVICE_TABLE(of, bmp280_of_match);
+MODULE_DEVICE_TABLE(spi, bmp280_id);
 
-static struct i2c_driver bmp280_driver = {
+static struct spi_driver bmp280_driver = {
     .driver = {
-        .name   = DEVICE_NAME,
-        .owner  = THIS_MODULE,
-        .of_match_table = of_match_ptr(bmp280_of_match),
+        .name = DEVICE_NAME,
+        .owner = THIS_MODULE,
     },
-    .probe      = bmp280_probe,
-    .remove     = bmp280_remove,
+    .probe = bmp280_probe,
+    .remove = bmp280_remove,
+    .id_table = bmp280_id,
 };
+
 
 
 static int __init bmp280_Init(void) {
-    printk("Hello_World\n");
-    return i2c_add_driver(&bmp280_driver);
+    printk(KERN_INFO "BMP280 SPI driver initialized\n");
+    return spi_register_driver(&bmp280_driver);
 }
 
 static void __exit bmp280_Exit(void) {
-
-    printk(KERN_INFO"GPIO driver unregistered\n");
-    i2c_del_driver(&bmp280_driver);
+    printk(KERN_INFO "BMP280 SPI driver exited\n");
+    spi_unregister_driver(&bmp280_driver);
 }
 
 module_init(bmp280_Init);
@@ -360,9 +380,6 @@ module_exit(bmp280_Exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nhom bat on");
-MODULE_DESCRIPTION("GPIO_set");
+MODULE_DESCRIPTION("BMP280 SPI Driver");
 
-// bmp280@76 {
-// 					compatible = "invensense,bmp280";
-// 					reg = <0x76>;
-// 				};
+
