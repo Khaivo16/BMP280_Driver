@@ -163,7 +163,7 @@ float read_temperature(int fd) {
     float T;
     char data[100];
     if (read(fd,data,sizeof(data)) < 0) {
-            perror("Failed to read...");
+            perror("Failed to read Temperature...");
             close(fd);
             return errno;
     }
@@ -177,7 +177,7 @@ float read_pressure(int fd) {
     char data[100];
     char *token;
     if (read(fd,data,sizeof(data)) < 0) {
-            perror("Failed to read...");
+            perror("Failed to read Pressure...");
             close(fd);
             return errno;
     }
