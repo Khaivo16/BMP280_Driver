@@ -32,6 +32,7 @@ static int major_number;
 // mode register
 #define BMP280_FORCED_MODE   0x01
 #define BMP280_NORMAL_MODE   0x03
+#define BMP280_SLEEP_MODE    0x00
 
 //OVERSAMPLING DEFINITION
 #define BMP280_OVERSAMP_SKIPPED   0x00
@@ -97,6 +98,10 @@ static void read_calib(struct i2c_client *client){
     dig_P7 = (data[19]<<8) | data[18];
     dig_P8 = (data[21]<<8) | data[20];
     dig_P9 = (data[23]<<8) | data[22];
+
+    for (int i =0; i<=23;i++) {
+        printk("data thu %d:%d",i,data[i]);
+    }
 }
 
 int32_t bmp280_compensate_T(int32_t adc_T) {
@@ -159,7 +164,6 @@ static int driver_close(struct inode *device_file, struct file *instance) {
 static long bmp280_ioctl(struct file *file, MODE_ACTIVE cmd, unsigned long arg)
 {
     char data_config,data_ctrl_meas;
-    printk(KERN_INFO "MODE: %d\n", cmd);
 
     if (!bmp280_client) {
         printk(KERN_ERR "bmp280_client is NULL\n");
@@ -235,7 +239,7 @@ static ssize_t driver_read(struct file *File, char *user_buffer, size_t count, l
 	/* Get amount of data to copy */
 	to_copy = min(count, sizeof(out_string));
     // Read data from MPU6050 sensor
-    read_calib(bmp280_client);
+
     adc_T = (i2c_smbus_read_byte_data(bmp280_client, 0xFA) << 12) | (i2c_smbus_read_byte_data(bmp280_client, 0xFB) << 4) | (i2c_smbus_read_byte_data(bmp280_client, 0xFC) >> 4);
     adc_P = (i2c_smbus_read_byte_data(bmp280_client, 0xF7) << 12) | (i2c_smbus_read_byte_data(bmp280_client,0xF8) << 4) | (i2c_smbus_read_byte_data(bmp280_client, 0xF9) >> 4);
 
@@ -243,7 +247,6 @@ static ssize_t driver_read(struct file *File, char *user_buffer, size_t count, l
     P = bmp280_compensate_P(adc_P, t_fine);
 
     TEM = (int32_t)((t_fine * 5 + 128) >> 8);
-    printk("%d\n",P);
     snprintf(out_string, sizeof(out_string),"%d.%d\n%d.%d\n", TEM/100, TEM%100, P/100, P%100);
 	/* Copy data to user */
 	not_copied = copy_to_user(user_buffer, out_string, to_copy);
@@ -267,13 +270,14 @@ static int bmp280_probe(struct i2c_client *client, const struct i2c_device_id *i
 
     // Set power management register to wake up device
     ret = i2c_smbus_read_byte_data(client, BMP280_REG_ID);
+    printk("Chip ID: 0x%x\n",ret);
     if (ret != 0x58) {
-        printk("ma ID: %x",ret);
         printk(KERN_ERR "Failed to wake up BMP\n");
         return -1;
     }
-
+    
     bmp280_client = client;
+    
     /*Register a major number*/
 	major_number = register_chrdev(0,DEVICE_NAME,&fops);
     if (major_number<0) {
@@ -287,15 +291,16 @@ static int bmp280_probe(struct i2c_client *client, const struct i2c_device_id *i
         printk(KERN_ALERT"fail to register device class\n");
         return PTR_ERR(bmp280_class);
     }
-    /*GPIO device*/
+    /*BMP280 device*/
 	bmp280_device = device_create(bmp280_class,NULL,MKDEV(major_number,0),NULL,DEVICE_NAME);
     if (IS_ERR(bmp280_device)){
         class_destroy(bmp280_class);
         unregister_chrdev(major_number,DEVICE_NAME);
-        printk(KERN_ALERT"fail to create GPIO device\n");
+        printk(KERN_ALERT"fail to create BMP280 device\n");
         return PTR_ERR(bmp280_device);
     }
-    printk(KERN_INFO "BMP280 driver installed\n");
+    printk(KERN_INFO "BMP280 driver probed\n");
+    read_calib(bmp280_client);
     return 0;
 }
 
@@ -308,7 +313,6 @@ static void bmp280_remove(struct i2c_client *client)
     printk(KERN_INFO "BMP280 driver removed\n");
 
     // Clean up
- 
 }
 
 // static const struct i2c_device_id bmp280_id[] = {
@@ -345,13 +349,13 @@ static struct i2c_driver bmp280_driver = {
 
 
 static int __init bmp280_Init(void) {
-    printk("Hello_World\n");
+    printk("BMP280 I2C driver initialized\n");
     return i2c_add_driver(&bmp280_driver);
 }
 
 static void __exit bmp280_Exit(void) {
 
-    printk(KERN_INFO"GPIO driver unregistered\n");
+    printk(KERN_INFO"BMP280 I2C driver exited\n");
     i2c_del_driver(&bmp280_driver);
 }
 
@@ -360,7 +364,7 @@ module_exit(bmp280_Exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nhom bat on");
-MODULE_DESCRIPTION("GPIO_set");
+MODULE_DESCRIPTION("BMP280_set");
 
 // bmp280@76 {
 // 					compatible = "invensense,bmp280";

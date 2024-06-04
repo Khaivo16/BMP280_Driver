@@ -79,7 +79,7 @@ int BMP_mode(mode_interface mode) {
     }
     }
     else if (mode == SPI_mode) {
-        fd = open("/dev/bmp280_driver_spi",O_RDWR);
+        fd = open("/dev/bmp280_device_spi",O_RDWR);
         if (fd<0) {
         perror("Failed to open SPI device...\n");
         return errno;

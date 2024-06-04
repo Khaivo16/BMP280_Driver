@@ -6,8 +6,8 @@
 #include <linux/spi/spi.h>
 #include <linux/device.h>
 
-#define DEVICE_NAME "bmp280_driver_spi"
-#define CLASS_NAME "bmp280_spi_device"
+#define DEVICE_NAME "bmp280_device_spi"
+#define CLASS_NAME "bmp280_device_spi"
 #define MY_BUS_NUM 0
 
 static struct class *bmp280_class=NULL;
@@ -41,6 +41,7 @@ static int major_number;
 // mode register
 #define BMP280_FORCED_MODE   0x01
 #define BMP280_NORMAL_MODE   0x03
+#define BMP280_SLEEP_MODE    0x00
 
 //OVERSAMPLING DEFINITION
 #define BMP280_OVERSAMP_SKIPPED   0x00
@@ -100,8 +101,8 @@ int bmp280_write_register(struct spi_device *spi, uint8_t reg, uint8_t value)
 int bmp280_read_register(struct spi_device *spi, uint8_t reg) {
     // Ensure MSB is 1 to indicate read operation
     reg |= 0x80;
-    
-    int ret = spi_w8r8(spi, reg);
+    int ret;
+    ret = spi_w8r8(spi, reg);
     if (ret < 0) {
         printk(KERN_ERR "SPI read failed: %d\n", ret);
         return ret;
@@ -269,7 +270,6 @@ static ssize_t driver_read(struct file *File, char *user_buffer, size_t count, l
     P = bmp280_compensate_P(adc_P, t_fine);
 
     TEM = (int32_t)((t_fine * 5 + 128) >> 8);
-    printk("%d\n",TEM);
     snprintf(out_string, sizeof(out_string),"%d.%d\n%d.%d\n", TEM/100, TEM%100, P/100, P%100);
 	/* Copy data to user */
 	not_copied = copy_to_user(user_buffer, out_string, to_copy);
@@ -308,9 +308,8 @@ static int bmp280_probe(struct spi_device *spi) {
     if (id != 0x58) {
         printk("ma ID: %x",id);
         printk(KERN_ERR "Failed to wake up BMP\n");
-        return ret;
+        return -1;
     }
-    read_calib();
     /*Register a major number*/
 	major_number = register_chrdev(0,DEVICE_NAME,&fops);
     if (major_number<0) {
@@ -324,16 +323,17 @@ static int bmp280_probe(struct spi_device *spi) {
         printk(KERN_ALERT"fail to register device class\n");
         return PTR_ERR(bmp280_class);
     }
-    /*GPIO device*/
+    /*BMP280 device*/
 	bmp280_device = device_create(bmp280_class,NULL,MKDEV(major_number,0),NULL,DEVICE_NAME);
     if (IS_ERR(bmp280_device)){
         class_destroy(bmp280_class);
         unregister_chrdev(major_number,DEVICE_NAME);
-        printk(KERN_ALERT"fail to create GPIO device\n");
+        printk(KERN_ALERT"fail to create BMP280 device\n");
         return PTR_ERR(bmp280_device);
     }
 
     printk(KERN_INFO "BMP280 driver probed\n");
+    read_calib();
 
     return 0;
 }
@@ -381,5 +381,4 @@ module_exit(bmp280_Exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nhom bat on");
 MODULE_DESCRIPTION("BMP280 SPI Driver");
-
 
